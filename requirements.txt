@@ -1,0 +1,9 @@
+databench_eval
+torch
+ipython
+protobuf
+transformers[torch]
+pandas
+numpy
+huggingface-hub
+sentencepiece
