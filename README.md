@@ -7,3 +7,19 @@ Links:
 - https://semeval.github.io/SemEval2025/
 - https://jorses.github.io/semeval/
 - https://www.codabench.org/competitions/3360/
+
+## Installation
+Create a virtual environment
+```
+python -m venv .env
+source .env/bin/activate
+```
+Install dependencies:
+```
+pip install -r requirements.txt
+```
+## Baseline
+Run the baseline model:
+```
+python baseline.py
+``` 
