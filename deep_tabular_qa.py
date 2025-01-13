@@ -43,7 +43,7 @@ class DeepTabQA:
         if 'prompt_template' in self.config:
             environment = jinja2.Environment(loader=jinja2.FileSystemLoader(self.config['experiment_dir']))
             template = environment.get_template(self.config['prompt_template'])
-            s = template.render({'df': df})
+            s = template.render({'df': df, 'question': question})
         else:
             s = f'''
 You are a pandas code generator. Your goal is to complete the function provided.
