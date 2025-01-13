@@ -1,11 +1,14 @@
+import os
 from typing import List
 import argparse
 import torch
 import pandas as pd
 import numpy as np
 import zipfile
+import jinja2
+import yaml
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, CodeAgent
 from datasets import Dataset
 
 from databench_eval import Runner, Evaluator, utils
@@ -13,17 +16,21 @@ from databench_eval.utils import load_sample
 
 
 class DeepTabQA:
-    def __init__(self, model_name: str='mistralai/Mistral-7B-Instruct-v0.3'):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    def __init__(self, config: dict):
+        self.config = config
+        
+        print(self.config)
+
+        self.tokenizer = AutoTokenizer.from_pretrained(config['model_name'], trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            config['model_name'],
             trust_remote_code=True,
             torch_dtype="auto",
         )
         self.model.cuda()
+        
 
-    @staticmethod
-    def prompt_generator(row: dict) -> str:
+    def prompt_generator(self, row: dict) -> str:
         """ IMPORTANT: 
         **Only the question and dataset keys will be available during the actual competition**.
         You can, however, try to predict the answer type or columns used
@@ -33,10 +40,12 @@ class DeepTabQA:
         question = row["question"]
         df = load_sample(dataset)
 
-        #pd.set_option('display.max_rows', None)
-        #pd.set_option('display.max_columns', None)
-
-        s = f'''
+        if 'prompt_template' in self.config:
+            environment = jinja2.Environment(loader=jinja2.FileSystemLoader(self.config['experiment_dir']))
+            template = environment.get_template(self.config['prompt_template'])
+            s = template.render({'df': df})
+        else:
+            s = f'''
 You are a pandas code generator. Your goal is to complete the function provided.
 * You must not write any more code apart from that.
 * You only have access to pandas and numpy.
@@ -57,8 +66,7 @@ def answer(df: pd.DataFrame):
     return'''
         return s
     
-    @staticmethod
-    def postprocess(response: str, dataset: str, loader):
+    def postprocess(self, response: str, dataset: str, loader):
         try:
             df = loader(dataset)
             global ans
@@ -89,20 +97,22 @@ def answer(df):
             print(e)
             return f"__CODE_ERROR__: {e}"
         
+    def generate(self, prompt) -> str:
+        #escaped = p.replace('"', '\\"')
+        inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
+        tokens = self.model.generate(
+            **inputs,
+            max_new_tokens=128,
+            temperature=0.2,
+            do_sample=True,
+            pad_token_id=self.tokenizer.eos_token_id
+        )
+        return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
+    
     def model_call(self, prompts: List) -> List:
         results = []
         for p in prompts:
-            #escaped = p.replace('"', '\\"')
-            inputs = self.tokenizer(p, return_tensors="pt").to(self.model.device)
-            tokens = self.model.generate(
-                **inputs,
-                max_new_tokens=128,
-                temperature=0.2,
-                do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-            answer = self.tokenizer.decode(tokens[0], skip_special_tokens=True)
-            results.append(answer)
+            results.append(self.generate(p))
         return results
 
     def get_runner(self, lite: bool, qa: Dataset, batch_size: int=10) -> Runner:
@@ -118,30 +128,52 @@ def answer(df):
         )
         return runner
 
+    def print_evaluation(self, evaluator, responses, responses_lite):
+        accuracy = evaluator.eval(responses)
+        accuracy_lite = evaluator.eval(responses_lite, lite=True)
+        with open(os.path.join(self.config['experiment_dir'], 'evaluation.txt'), 'w') as evalfile:
+            print(f"DataBench accuracy is {accuracy}", file=evalfile)
+            print(f"DataBench_lite accuracy is {accuracy_lite}", file=evalfile)
+        print(f"DataBench accuracy is {accuracy}")
+        print(f"DataBench_lite accuracy is {accuracy_lite}")
+
+    def create_zip(self, file_predictions: str, file_predictions_lite: str):
+        with zipfile.ZipFile(os.path.join(self.config['experiment_dir'], "Archive.zip"), "w") as zipf:
+            zipf.write(file_predictions)
+            zipf.write(file_predictions_lite)
+        print(f"Created Archive.zip containing {file_predictions} and {file_predictions_lite}")
+
 def main():
 
-    #parser = argparse.ArgumentParser(prog='')
-    #parser.add_argument('-o', "--opts",)   
+    parser = argparse.ArgumentParser(prog='')
+    parser.add_argument('config', help='A configuration file')
 
-    deep_tab_qa = DeepTabQA(model_name='mistralai/Mistral-7B-Instruct-v0.3')
+    args = parser.parse_args()
+
+    with open(args.config) as fconfig:
+        configuration = yaml.safe_load(fconfig)
     
-    qa = utils.load_qa(name="qa")#.select(range(100))
+    if not configuration['experiment_dir']:
+        raise Exception('Set the experiment_dir in the config.yaml')
     
-    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=100)
-    runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=100)
+    deep_tab_qa = DeepTabQA(config=configuration)
+    
+    qa = utils.load_qa(name="semeval", split="dev")
+    #qa = utils.load_qa(name="qa").select(range(10))
+    
+    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=1000)
+    runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=1000)
 
     evaluator = Evaluator(qa=qa)
 
-    responses = runner.run(save="predictions.txt")
-    responses_lite = runner_lite.run(save="predictions_lite.txt")
+    file_predictions = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions.txt")
+    file_predictions_lite = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions_lite.txt")
 
-    print(f"DataBench accuracy is {evaluator.eval(responses)}")  # ~0.15
-    print(f"DataBench_lite accuracy is {evaluator.eval(responses_lite, lite=True)}")  # ~0.07
+    responses = runner.run(save=file_predictions)
+    responses_lite = runner_lite.run(save=file_predictions_lite)
 
-    with zipfile.ZipFile("Archive.zip", "w") as zipf:
-        zipf.write("predictions.txt")
-        zipf.write("predictions_lite.txt")
-    print("Created Archive.zip containing predictions.txt and predictions_lite.txt")
+    deep_tab_qa.print_evaluation(evaluator=evaluator, responses=responses, responses_lite=responses_lite)
+    deep_tab_qa.create_zip(file_predictions, file_predictions_lite)
 
 if __name__ == '__main__':
     main()
