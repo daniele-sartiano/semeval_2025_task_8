@@ -132,6 +132,7 @@ def answer(df):
         accuracy = evaluator.eval(responses)
         accuracy_lite = evaluator.eval(responses_lite, lite=True)
         with open(os.path.join(self.config['experiment_dir'], 'evaluation.txt'), 'w') as evalfile:
+            print(yaml.dump(self.config), file=evalfile)
             print(f"DataBench accuracy is {accuracy}", file=evalfile)
             print(f"DataBench_lite accuracy is {accuracy_lite}", file=evalfile)
         print(f"DataBench accuracy is {accuracy}")
@@ -155,6 +156,9 @@ def main():
     
     if not configuration['experiment_dir']:
         raise Exception('Set the experiment_dir in the config.yaml')
+    
+    if not configuration['description']:
+        raise Exception('Set the description in the config.yaml')
     
     deep_tab_qa = DeepTabQA(config=configuration)
     
