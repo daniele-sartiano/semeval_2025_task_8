@@ -144,6 +144,45 @@ def answer(df):
             zipf.write(file_predictions_lite)
         print(f"Created Archive.zip containing {file_predictions} and {file_predictions_lite}")
 
+
+from langchain_experimental.agents import create_pandas_dataframe_agent
+from langchain_huggingface import HuggingFacePipeline
+
+class LangChainAgentDeepTabQA(DeepTabQA):
+    def __init__(self, config: dict):
+        self.config = config
+
+        print(self.config)
+
+        self.llm = HuggingFacePipeline.from_model_id(
+            model_id=config['model_name'],
+            task="text-generation",
+            pipeline_kwargs={
+                "max_new_tokens": 128,
+                #"top_k": 50,
+                "temperature": 0.2,
+            },
+        )
+
+    def prompt_generator(self, row: dict) -> str:
+        return row
+    
+    def model_call(self, rows: List):
+        return rows
+
+    def postprocess(self, row: dict, dataset: str, loader):
+        agent_executor = create_pandas_dataframe_agent(
+            self.llm,
+            loader(dataset),
+            #agent_type="tool-calling",
+            verbose=True,
+            allow_dangerous_code=True
+        )
+
+        print(row)
+
+        return agent_executor.invoke(row['question'])
+
 def main():
 
     parser = argparse.ArgumentParser(prog='')
@@ -153,14 +192,17 @@ def main():
 
     with open(args.config) as fconfig:
         configuration = yaml.safe_load(fconfig)
-    
+
     if not configuration['experiment_dir']:
         raise Exception('Set the experiment_dir in the config.yaml')
     
     if not configuration['description']:
         raise Exception('Set the description in the config.yaml')
     
-    deep_tab_qa = DeepTabQA(config=configuration)
+    if 'class' in configuration and configuration['class'] == 'LangChainAgentDeepTabQA':
+        deep_tab_qa = LangChainAgentDeepTabQA(config=configuration)
+    else:
+        deep_tab_qa = DeepTabQA(config=configuration)
     
     qa = utils.load_qa(name="semeval", split="dev")
     #qa = utils.load_qa(name="qa").select(range(10))

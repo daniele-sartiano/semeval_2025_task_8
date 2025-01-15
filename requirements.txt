@@ -8,3 +8,7 @@ numpy
 huggingface-hub
 sentencepiece
 jinja2
+langchain
+langchain-huggingface
+langchain-experimental
+tabulate
