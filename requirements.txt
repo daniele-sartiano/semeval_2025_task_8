@@ -12,3 +12,5 @@ langchain
 langchain-huggingface
 langchain-experimental
 tabulate
+peft
+trl
