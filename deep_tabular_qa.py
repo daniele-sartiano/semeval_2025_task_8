@@ -20,13 +20,19 @@ class DeepTabQA:
         self.config = config
         
         print(self.config)
-
-        self.tokenizer = AutoTokenizer.from_pretrained(config['model_name'], trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            config['model_name'],
-            trust_remote_code=True,
-            torch_dtype="auto",
-        )
+        if 'model_local' in self.config and self.config['model_local']:
+            self.tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+            self.model = AutoModelForCausalLM.from_pretrained(
+                config['model_name'],
+                torch_dtype="auto",
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(config['model_name'], trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                config['model_name'],
+                trust_remote_code=True,
+                torch_dtype="auto",
+            )
         self.model.cuda()
         
 
