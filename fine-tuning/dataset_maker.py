@@ -9,6 +9,12 @@ from databench_eval import utils, Evaluator
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
+import os
+
+from transformers import set_seed
+
+set_seed(82)
+
 class DatasetMaker:
     def __init__(self, config: dict):
         self.config = config
@@ -68,8 +74,8 @@ Respond with only the modified code in the following format:
             
             df = utils.load_table(dataset)
             df_lite = utils.load_sample(dataset)
-            environment = jinja2.Environment(loader=jinja2.FileSystemLoader('.'))
-            template = environment.get_template(self.config['prompt_template'])
+            environment = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.abspath(self.config['prompt_template']).replace(os.path.basename(self.config['prompt_template']), '')))
+            template = environment.get_template(os.path.basename(self.config['prompt_template']))
             prompt = template.render({'df': df, 'question': question})
 
             llm_response = self.invoke_llm(prompt)
@@ -98,12 +104,12 @@ def answer(df):
                 # evaluate gold vs generated
                 if evaluator.compare(ans, truth, row['type']):
                     with open(self.config['fine_tuning_dataset'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': question, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                        for entry in set([json.dumps({'prompt': prompt, 'chosen': lead+instruction, 'rejected': lead+rej}) for rej in self.create_rejected(question, instruction=instruction)]):
                             print(entry, file=fout)
                 # lite task
                 if evaluator.compare(ans_lite, truth_lite, row['type']):
                     with open(self.config['fine_tuning_dataset_lite'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': question, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                        for entry in set([json.dumps({'prompt': prompt, 'chosen': lead+instruction, 'rejected': lead+rej}) for rej in self.create_rejected(question, instruction=instruction)]):
                             print(entry, file=fout)
                     
             except Exception as e:
@@ -115,22 +121,31 @@ def answer(df):
 def main():
 
     parser = argparse.ArgumentParser(prog='')
-    parser.add_argument('action', choices=['dataset', 'fine-tuning'])
+    
+    parser.add_argument('name')
+    parser.add_argument('model')
+    parser.add_argument('prompt')
 
     args = parser.parse_args()
-    if args.action == 'dataset':
-        config = {
-            'model_name': 'deepseek-ai/deepseek-coder-6.7b-instruct',
-            'prompt_template': 'prompts/prompt_improved_1.txt',
-            'fine_tuning_dataset': 'fine_tuning_dataset.json',
-            'fine_tuning_dataset_lite': 'fine_tuning_dataset_lite.json'
-        }
 
-        d = DatasetMaker(config=config)
-        d.generate()
-    elif args.action == 'fine-tuning':
-        dataset = load_dataset('json', data_files='fine_tuning_dataset.json')
-        dataset.save_to_disk('ft-dataset')
+    
+    dataset_name = 'fine_tuning_dataset.json' if not args.name else args.name
+    dataset_name_lite = f"{dataset_name.split('.json')[0]}_lite.json"
+
+    config = {
+        'model_name': args.model,
+        'prompt_template': args.prompt,
+        'fine_tuning_dataset': dataset_name,
+        'fine_tuning_dataset_lite': dataset_name_lite
+    }
+
+    print(config)
+
+    d = DatasetMaker(config=config)
+    d.generate()
+    
+    #dataset = load_dataset('json', data_files='fine_tuning_dataset.json')
+    #dataset.save_to_disk('ft-dataset')
 
 if __name__ == '__main__':
     main()
