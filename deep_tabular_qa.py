@@ -15,6 +15,10 @@ from databench_eval import Runner, Evaluator, utils
 from databench_eval.utils import load_sample
 
 
+from transformers import set_seed
+
+set_seed(82)
+
 class DeepTabQA:
     def __init__(self, config: dict):
         self.config = config
