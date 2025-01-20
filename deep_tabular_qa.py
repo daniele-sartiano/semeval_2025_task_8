@@ -84,9 +84,14 @@ def answer(df: pd.DataFrame):
             lead = """
 def answer(df):
     return """
+            if 'model_chat_template' in self.config and self.config['model_chat_template']:
+                instruction = response.strip()                    
+            else:
+                instruction = response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
+
             exec_string = (
                 lead
-                + response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
+                + instruction
                 + "\nans = answer(df)"
             )
 
@@ -94,6 +99,9 @@ def answer(df):
             exec(exec_string, local_vars)
             ans = local_vars['ans']
             
+            print('exec_string')
+            print(exec_string)
+            print('-')
             print(response)
             print('--> answer')
             print(ans)
@@ -108,16 +116,27 @@ def answer(df):
             return f"__CODE_ERROR__: {e}"
         
     def generate(self, prompt) -> str:
-        #escaped = p.replace('"', '\\"')
-        inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
-        tokens = self.model.generate(
-            **inputs,
-            max_new_tokens=128,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=self.tokenizer.eos_token_id
-        )
-        return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
+        #escaped = prompt.replace('"', '\\"')
+        if 'model_chat_template' in self.config and self.config['model_chat_template']:
+            inputs = self.tokenizer.apply_chat_template([{'content': prompt, 'role': 'user'}], add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                inputs, 
+                max_new_tokens=128, 
+                do_sample=False, 
+                num_return_sequences=1,
+                temperature=0.2, 
+                eos_token_id=self.tokenizer.eos_token_id)
+            return self.tokenizer.decode(tokens[0][len(inputs[0]):], skip_special_tokens=True)
+        else:
+            inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                **inputs,
+                max_new_tokens=128,
+                temperature=0.2,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
     
     def model_call(self, prompts: List) -> List:
         results = []
