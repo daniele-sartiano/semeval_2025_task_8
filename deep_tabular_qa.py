@@ -7,6 +7,7 @@ import numpy as np
 import zipfile
 import jinja2
 import yaml
+import json
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, CodeAgent
 from datasets import Dataset
@@ -99,11 +100,16 @@ def answer(df):
                 instruction = response.strip()
             elif 'batch_decode' in self.config and self.config['batch_decode']:
                 lead = """
+import pandas as pd
+import numpy as np
+
 def answer(df): """
                 instruction = response.replace("<|EOT|>", "")
+                # patch: drop extra lines
                 lines = instruction.split('\n')
-                if lines[-1] and lines[-1][0] != ' ':
-                    instruction = '\n'.join(lines[:-1])
+                while lines[-1] and lines[-1][0] != ' ':
+                    lines = lines[:-1]
+                instruction = '\n'.join(lines[:-1])
             else:
                 instruction = response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
 
@@ -112,6 +118,12 @@ def answer(df): """
                 + instruction
                 + "\nans = answer(df)"
             )
+
+            if self.config.get('DUMP', False):
+                with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
+                    print(json.dumps({'prompt': prompt, 'exec_string': exec_string}), file=dump_file)
+                    #print(f"{json.dumps(prompt)}\t{json.dumps(exec_string)}", file=dump_file)
+                return
 
             local_vars = {"df": df, "pd": pd, "np": np}
             exec(exec_string, local_vars)
@@ -202,7 +214,8 @@ def answer(df): """
     def create_zip(self, file_predictions: str, file_predictions_lite: str):
         with zipfile.ZipFile(os.path.join(self.config['experiment_dir'], "Archive.zip"), "w") as zipf:
             zipf.write(file_predictions)
-            zipf.write(file_predictions_lite)
+            if file_predictions_lite:
+                zipf.write(file_predictions_lite)
         print(f"Created Archive.zip containing {file_predictions} and {file_predictions_lite}")
 
 
@@ -265,21 +278,33 @@ def main():
     else:
         deep_tab_qa = DeepTabQA(config=configuration)
     
-    perform_lite = 'lite' not in configuration or ('lite' in configuration and configuration['lite'])
+    perform_lite = configuration.get('lite', True)
 
-    qa = utils.load_qa(name="semeval", split="dev")
+    limit = configuration.get('limit', None)
+
+    split = configuration.get('split', 'dev')
+
+    if limit is None:
+        qa = utils.load_qa(name="semeval", split=split, num_proc=32)
+    else:
+        qa = utils.load_qa(name="semeval", split=split, num_proc=32).select(range(10))
     #qa = utils.load_qa(name="qa").select(range(10))
     
-    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=1000)
-    runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=1000)
-
-    file_predictions = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions.txt")
-    file_predictions_lite = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions_lite.txt")
+    print('dataset loaded')
     
-    evaluator = Evaluator(qa=qa)
-
+    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=100)
+    file_predictions = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions.txt")
     responses = runner.run(save=file_predictions)
-    responses_lite = runner_lite.run(save=file_predictions_lite)
+
+    if perform_lite:
+        runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=100)
+        responses_lite = runner_lite.run(save=file_predictions_lite)
+        file_predictions_lite = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions_lite.txt")
+    else:
+        responses_lite = []
+        file_predictions_lite = None
+
+    evaluator = Evaluator(qa=qa)
 
     deep_tab_qa.print_evaluation(evaluator=evaluator, responses=responses, responses_lite=responses_lite)
     deep_tab_qa.create_zip(file_predictions, file_predictions_lite)
