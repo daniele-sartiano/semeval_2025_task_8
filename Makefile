@@ -20,3 +20,11 @@ $(EXPERIMENTS_DIR)/config.yaml:
 
 run: $(EXPERIMENTS_DIR)
 	$(PYTHON) deep_tabular_qa.py $(EXPERIMENTS_DIR)/config.yaml
+
+OPENAI_API_KEY=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
+
+fine-tuning/chatpgt_dataset/dataset_gpt4o.json:
+	OPENAI_API_KEY=$(OPENAI_API_KEY) $(PYTHON) fine-tuning/dataset_openai.py -model gpt-4o < fine-tuning/chatpgt_dataset/dump.json > $@
+
+fine-tuning/chatpgt_dataset/dataset_gpt4o_postproc.json: fine-tuning/chatpgt_dataset/dataset_gpt4o.json
+	$(PYTHON) fine-tuning/dataset_openai.py -post-processing < $< > $@
