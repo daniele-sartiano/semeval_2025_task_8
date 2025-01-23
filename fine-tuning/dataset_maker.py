@@ -31,15 +31,29 @@ class DatasetMaker:
 
 
     def invoke_llm(self, prompt: str):
-        inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
-        tokens = self.model.generate(
-            **inputs,
-            max_new_tokens=128,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=self.tokenizer.eos_token_id
-        )
-        return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
+        if 'model_chat_template' in self.config and self.config['model_chat_template']:
+            inputs = self.tokenizer.apply_chat_template([{'content': prompt, 'role': 'user'}], add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                inputs, 
+                max_new_tokens=128, 
+                do_sample=True, 
+                #top_k=50, 
+                #top_p=0.95,
+                #num_return_sequences=1, 
+                eos_token_id=self.tokenizer.eos_token_id)
+            
+            print(len(tokens))
+            return self.tokenizer.decode(tokens[0][len(inputs[0]):], skip_special_tokens=True)
+        else:
+            inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                **inputs,
+                max_new_tokens=128,
+                temperature=0.2,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
 
     def create_rejected(self, question: str, instruction: str):
 
@@ -47,7 +61,7 @@ class DatasetMaker:
 Modify the following Python instruction to return an incorrect value for the question: '{question}'.
 Create an alternative version with the main instruction altered, so that it returns an incorrect value.
 The error can be simple or non-trivial, but must remain in one line. Only use pandas and numpy.
-Do not include any additional text or explanations. Write just one.
+Do not include any additional text or explanations. Write minimun 5 samples.
 Respond with only the modified code in the following format:
 
 <code>{instruction}</code>
@@ -56,6 +70,7 @@ Respond with only the modified code in the following format:
         response = self.invoke_llm(prompt=prompt)
         answer = response.replace(prompt, '')
         
+        print('rejected')
         print(answer)
         
         pattern = r"<code>(.*?)</code>"
@@ -79,14 +94,27 @@ Respond with only the modified code in the following format:
             prompt = template.render({'df': df, 'question': question})
 
             llm_response = self.invoke_llm(prompt)
-            # instruction contains something like df[df['selfMade'] == True]['personName'].iloc[0]
-            instruction = llm_response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
+
+
+            if 'model_chat_template' in self.config and self.config['model_chat_template']:
+                instruction = llm_response.strip()
+                if len(instruction.split('\n')) > 0:
+                    instruction = '; '.join(instruction.split('\n'))
+            else:
+                # instruction contains something like df[df['selfMade'] == True]['personName'].iloc[0]
+                instruction = llm_response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
             
+            print(f'row\n{row}')
+            print(f'llm_response\n{llm_response}')
+            print(f'instruction\n{instruction}')
+
             global ans, ans_lite
             try:
                 lead = """
 def answer(df):
     return """
+                if 'return' in instruction:
+                    lead = lead.replace('return ', '')
                 exec_string = (
                     lead
                     + instruction
@@ -104,13 +132,13 @@ def answer(df):
                 # evaluate gold vs generated
                 if evaluator.compare(ans, truth, row['type']):
                     with open(self.config['fine_tuning_dataset'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': prompt, 'chosen': lead+instruction, 'rejected': lead+rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                        for entry in set([json.dumps({'prompt': prompt, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
                             print(entry, file=fout)
                 # lite task
-                if evaluator.compare(ans_lite, truth_lite, row['type']):
-                    with open(self.config['fine_tuning_dataset_lite'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': prompt, 'chosen': lead+instruction, 'rejected': lead+rej}) for rej in self.create_rejected(question, instruction=instruction)]):
-                            print(entry, file=fout)
+                #if evaluator.compare(ans_lite, truth_lite, row['type']):
+                #    with open(self.config['fine_tuning_dataset_lite'], 'a+') as fout:
+                #        for entry in set([json.dumps({'prompt': prompt, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                #           print(entry, file=fout)
                     
             except Exception as e:
                 import traceback
@@ -125,6 +153,7 @@ def main():
     parser.add_argument('name')
     parser.add_argument('model')
     parser.add_argument('prompt')
+    parser.add_argument('-model_chat_template', action='store_true')
 
     args = parser.parse_args()
 
@@ -138,6 +167,9 @@ def main():
         'fine_tuning_dataset': dataset_name,
         'fine_tuning_dataset_lite': dataset_name_lite
     }
+
+    if args.model_chat_template:
+        config['model_chat_template'] = True
 
     print(config)
 
