@@ -1,0 +1,22 @@
+You are a pandas code generator. Your goal is to complete the function `answer` below.
+* Do not include any explanations, additional comments, or extra code.
+* You only have access to pandas and numpy.
+* Pay attention to the type formatting .
+* You cannot read files from disk.
+* Don't write other functions.
+* The output must be concise and directly solve the problem.
+
+Table columns: ['id', 'author_id', 'author_name', 'author_handler', 'author_avatar', 'lang', 'type', 'text', 'date', 'mention_ids', 'mention_names', 'retweets', 'favorites', 'links', 'links_first', 'image_links', 'image_links_first', 'rp_user_id', 'rp_user_name', 'location', 'tweet_link', 'search']
+Dataframe:
+[{"id":1166109737643139072,"author_id":1007329988,"author_name":"Lau_Arbona","author_handler":"Laura_Arbona","author_avatar":"https:\/\/pbs.twimg.com\/profile_images\/763084007919775744\/o-n8mo3x_bigger.jpg","lang":"es","type":"original","text":"@ING_es me sirve pagar con vuestra tarjeta en todo el mundo? Puedo viajar a Islandia, Irlanda, Bali o Kenia y pagar con tarjeta debito? #DudaExistencial","date":1566857201000,"mention_ids":[270815203],"mention_names":["ING_es"],"retweets":0,"favorites":0,"links":[],"links_first":null,"image_links":[],"image_links_first":null,"rp_user_id":null,"rp_user_name":null,"location":null,"tweet_link":"https:\/\/twitter.com\/Laura_Arbona\/status\/1166109737643139072","search":"to:@ING_es"},{"id":1166096471650963456,"author_id":868749503461040130,"author_name":"Jimmy McNulty","author_handler":"JimmyMcNulty16","author_avatar":"https:\/\/pbs.twimg.com\/profile_images\/894228274477453312\/suiOF8ll_bigger.jpg","lang":"es","type":"reply","text":"Te obligan a bajar una app que funciona de pena, y a la hora de pagar con el m\u00f3vil no te deja porque es Xiaomi, haces una reclamaci\u00f3n y una se\u00f1orita te contesta que te compres otro, que con Xiaomi no funciona, muy bien por ING un cliente menos","date":1566854038000,"mention_ids":[],"mention_names":[],"retweets":0,"favorites":1,"links":[],"links_first":null,"image_links":[],"image_links_first":null,"rp_user_id":270815203.0,"rp_user_name":"ING_es","location":null,"tweet_link":"https:\/\/twitter.com\/JimmyMcNulty16\/status\/1166096471650963456","search":"to:@ING_es"},{"id":1166078033691840513,"author_id":2882602743,"author_name":"la chula","author_handler":"melgarcea60","author_avatar":"https:\/\/pbs.twimg.com\/profile_images\/1040324753645551616\/nhm6USJV_bigger.jpg","lang":"es","type":"reply","text":"M\u00e1s cajeros y m\u00e1s bancos, q as\u00ed se gana m\u00e1s pasta merecemos mejor trato,","date":1566849642000,"mention_ids":[],"mention_names":[],"retweets":0,"favorites":0,"links":[],"links_first":null,"image_links":[],"image_links_first":null,"rp_user_id":270815203.0,"rp_user_name":"ING_es","location":null,"tweet_link":"https:\/\/twitter.com\/melgarcea60\/status\/1166078033691840513","search":"to:@ING_es"},{"id":1166068194299252736,"author_id":1348393310,"author_name":"Mr_Gosky","author_handler":"Mr_gosky","author_avatar":"https:\/\/pbs.twimg.com\/profile_images\/1137593061209305089\/jhBfXIMm_bigger.png","lang":"es","type":"reply","text":"Oficina \ud83c\udfe2!!!\nY de paso... Crear puestos de trabajo!!, \ud83d\ude09","date":1566847296000,"mention_ids":[],"mention_names":[],"retweets":0,"favorites":3,"links":[],"links_first":null,"image_links":[],"image_links_first":null,"rp_user_id":270815203.0,"rp_user_name":"ING_es","location":null,"tweet_link":"https:\/\/twitter.com\/Mr_gosky\/status\/1166068194299252736","search":"to:@ING_es"},{"id":1166066536093814786,"author_id":867101041,"author_name":"Angeloclv","author_handler":"007Chispita","author_avatar":"https:\/\/pbs.twimg.com\/profile_images\/463700998448361472\/ZR_8nyW7_bigger.png","lang":"es","type":"original","text":"@ING_es no contestais a los mensajes o q pasa","date":1566846901000,"mention_ids":[270815203],"mention_names":["ING_es"],"retweets":1,"favorites":0,"links":[],"links_first":null,"image_links":[],"image_links_first":null,"rp_user_id":null,"rp_user_name":null,"location":null,"tweet_link":"https:\/\/twitter.com\/007Chispita\/status\/1166066536093814786","search":"to:@ING_es"}]
+Question: Is the most favorited author mainly communicating in Spanish?
+Function:
+def answer(df: pd.DataFrame):
+	return df[df['author_id'] == df.groupby('author_id')['favorites'].sum().idxmax()]['lang'].mode()[0] == 'es'
+
+Table columns: {{df.columns.to_list()}}
+Dataframe: {{df.head().to_json(orient='records')}}
+Question: {{question}}
+Function:
+def answer(df: pd.DataFrame):
+
