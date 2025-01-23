@@ -1,4 +1,5 @@
 import os
+import traceback
 from typing import List
 import argparse
 import torch
@@ -8,6 +9,8 @@ import zipfile
 import jinja2
 import yaml
 import json
+import gc
+import re
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, CodeAgent
 from datasets import Dataset
@@ -23,8 +26,8 @@ class MyRunner(Runner):
     def process_prompt(self, prompts, datasets):
         raw_responses = self.model_call(prompts)
         responses = [
-            self.postprocess(response=raw_response, dataset=dataset, prompt=prompt)
-            for raw_response, dataset, prompt in zip(raw_responses, datasets, prompts)
+            self.postprocess(response=raw_response, dataset=dataset, prompt=prompt, row=self.qa[i])
+            for i, (raw_response, dataset, prompt) in enumerate(zip(raw_responses, datasets, prompts))
         ]
         self.prompts.extend(prompts)
         self.raw_responses.extend(raw_responses)
@@ -51,7 +54,6 @@ class DeepTabQA:
             )
         self.model.cuda()
         
-
     def prompt_generator(self, row: dict) -> str:
         """ IMPORTANT: 
         **Only the question and dataset keys will be available during the actual competition**.
@@ -88,7 +90,7 @@ def answer(df: pd.DataFrame):
     return'''
         return s
     
-    def postprocess(self, response: str, dataset: str, prompt: str, loader):
+    def postprocess(self, response: str, dataset: str, prompt: str, row: dict, loader):
         try:
             df = loader(dataset)
             global ans
@@ -96,6 +98,30 @@ def answer(df: pd.DataFrame):
             lead = """
 def answer(df):
     return """
+            
+            def cleanup(code):
+                """ patch: drop extra lines """
+                code = code.replace("<|EOT|>", "")
+                lines = code.split('\n')
+                extra_code = None
+                for i,line in enumerate(lines):
+                    if not line.startswith(' '):
+                        extra_code = i+1
+                        break
+                if extra_code:
+                    lines = lines[:extra_code]
+                # fix column names
+                columns = df.columns.to_list()
+                for i,line in enumerate(lines):
+                    for m in re.finditer(r"'(\w+)'", line):
+                        name = m.group(1)
+                        if name not in columns:
+                            for col in columns:
+                                if col.startswith(f"{name}<"):
+                                    lines[i] = lines[i].replace(f"'{name}'", f"'{col}'")
+                                    break
+                return '\n'.join(lines)
+
             if 'model_chat_template' in self.config and self.config['model_chat_template']:
                 instruction = response.strip()
             elif 'batch_decode' in self.config and self.config['batch_decode']:
@@ -104,12 +130,7 @@ import pandas as pd
 import numpy as np
 
 def answer(df): """
-                instruction = response.replace("<|EOT|>", "")
-                # patch: drop extra lines
-                lines = instruction.split('\n')
-                while lines[-1] and lines[-1][0] != ' ':
-                    lines = lines[:-1]
-                instruction = '\n'.join(lines[:-1])
+                instruction = cleanup(response)
             else:
                 instruction = response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
 
@@ -122,29 +143,50 @@ def answer(df): """
             if self.config.get('DUMP', False):
                 with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
                     print(json.dumps({'prompt': prompt, 'exec_string': exec_string}), file=dump_file)
-                    #print(f"{json.dumps(prompt)}\t{json.dumps(exec_string)}", file=dump_file)
                 return
 
             local_vars = {"df": df, "pd": pd, "np": np}
             exec(exec_string, local_vars)
             ans = local_vars['ans']
             
-            print('exec_string')
-            print(exec_string)
-            print('-')
-            print(response)
-            print('--> answer')
-            print(ans)
-
             if isinstance(ans, pd.Series):
                 ans = ans.tolist()
             elif isinstance(ans, pd.DataFrame):
                 ans = ans.iloc[:, 0].tolist()
-            return ans.split('\n')[0] if '\n' in str(ans) else ans
+
+            value = ans.split('\n')[0] if '\n' in str(ans) else ans 
+
+            if 'answer' in row:
+                truth = row['sample_answer'] if loader == utils.load_sample else row['answer']
+                if not self.evaluator.compare(value, truth, row['type']):
+                    print('*'*80)
+                    print('|prompt')
+                    print(prompt)
+                    print('|dataset', dataset)
+                    print('|exec_string')
+                    print(exec_string)
+                    print('|response')
+                    print(response)
+                    print('|--> answer')
+                    print(ans)
+                    print('|row')
+                    print(row)
+
+            return value
         except Exception as e:
-            print(e)
+            print('*'*80)
+            print(f'Error {e}')
+            print('|response')
+            print(response)
+            print(traceback.format_exc())
             return f"__CODE_ERROR__: {e}.".replace('\n', '\\n')
-        
+    
+    @staticmethod
+    def flush():
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
     def generate(self, prompt) -> str:
 
         max_new_tokens = self.config.get('max_new_tokens', 128)
@@ -186,20 +228,24 @@ def answer(df): """
         results = []
         for p in prompts:
             results.append(self.generate(p))
+            self.flush()
         return results
 
     def get_runner(self, lite: bool, qa: Dataset, batch_size: int=10) -> Runner:
         load_data_fun = utils.load_table if not lite else utils.load_sample
-        runner = MyRunner(
+        self.runner = MyRunner(
             model_call=self.model_call,
             prompt_generator=self.prompt_generator,
-            postprocess=lambda response, dataset, prompt: self.postprocess(
-                response=response, dataset=dataset, prompt=prompt, loader=load_data_fun
+            postprocess=lambda response, dataset, prompt, row: self.postprocess(
+                response=response, dataset=dataset, prompt=prompt, row=row, loader=load_data_fun
             ),
             qa=qa,
             batch_size=batch_size,
         )
-        return runner
+
+        self.evaluator = Evaluator(qa=qa)
+
+        return self.runner
 
     def print_evaluation(self, evaluator, responses, responses_lite):
         accuracy = evaluator.eval(responses)
@@ -284,22 +330,23 @@ def main():
 
     split = configuration.get('split', 'dev')
 
+    batch_size = configuration.get('batch_size', 20)
+
     if limit is None:
         qa = utils.load_qa(name="semeval", split=split, num_proc=32)
     else:
         qa = utils.load_qa(name="semeval", split=split, num_proc=32).select(range(10))
-    #qa = utils.load_qa(name="qa").select(range(10))
     
     print('dataset loaded')
     
-    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=100)
+    runner = deep_tab_qa.get_runner(lite=False, qa=qa, batch_size=batch_size)
     file_predictions = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions.txt")
     responses = runner.run(save=file_predictions)
 
     if perform_lite:
-        runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=100)
-        responses_lite = runner_lite.run(save=file_predictions_lite)
+        runner_lite = deep_tab_qa.get_runner(lite=True, qa=qa, batch_size=batch_size)
         file_predictions_lite = os.path.join(deep_tab_qa.config['experiment_dir'], "predictions_lite.txt")
+        responses_lite = runner_lite.run(save=file_predictions_lite)
     else:
         responses_lite = []
         file_predictions_lite = None
