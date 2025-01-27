@@ -8,9 +8,10 @@ import numpy as np
 import zipfile
 import jinja2
 import yaml
-import json
 import gc
 import re
+import json
+import openai
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, CodeAgent
 from datasets import Dataset
@@ -22,13 +23,15 @@ from databench_eval.utils import load_sample
 from transformers import set_seed
 
 set_seed(82)
+
 class MyRunner(Runner):
     def process_prompt(self, prompts, datasets):
         raw_responses = self.model_call(prompts)
         responses = [
-            self.postprocess(response=raw_response, dataset=dataset, prompt=prompt, row=self.qa[i])
+            self.postprocess(response=raw_response, dataset=dataset, prompt=prompt, row=self.qa[i+len(self.responses)])
             for i, (raw_response, dataset, prompt) in enumerate(zip(raw_responses, datasets, prompts))
         ]
+        
         self.prompts.extend(prompts)
         self.raw_responses.extend(raw_responses)
         self.responses.extend(responses)
@@ -54,6 +57,45 @@ class DeepTabQA:
             )
         self.model.cuda()
         
+
+    @classmethod
+    def cleanup(cls, df, code):
+        """ patch: drop extra lines """
+        code = code.replace("<|EOT|>", "")
+        lines = code.split('\n')
+        extra_code = None
+        for i,line in enumerate(lines):
+            if 'def answer' in line:
+                continue
+            if not line.startswith(' '):
+                extra_code = i+1
+                break
+        if extra_code:
+            lines = lines[:extra_code]
+        # fix column names
+        columns = df.columns.to_list()
+        for i,line in enumerate(lines):
+            for m in re.finditer(r"'(\w+)'", line):
+                name = m.group(1)
+                if name not in columns:
+                    for col in columns:
+                        if col.startswith(f"{name}<"):
+                            lines[i] = lines[i].replace(f"'{name}'", f"'{col}'")
+                            break
+        return '\n'.join(lines)
+
+    @classmethod
+    def get_exec_string(cls, df, response):
+        instruction = cls.cleanup(df, response)
+
+        instructions = [el.strip() for el in instruction.split('\n')]
+        if 'def answer' not in instruction:
+            instructions.insert(0, "def answer(df):")
+        
+        exec_string = '\n'.join(['\t' + el if i > 0 else el for i, el in enumerate(instructions)])
+        exec_string += "\nans = answer(df)"
+        return exec_string
+    
     def prompt_generator(self, row: dict) -> str:
         """ IMPORTANT: 
         **Only the question and dataset keys will be available during the actual competition**.
@@ -92,58 +134,43 @@ def answer(df: pd.DataFrame):
     
     def postprocess(self, response: str, dataset: str, prompt: str, row: dict, loader):
         try:
+            value = None
             df = loader(dataset)
             global ans
+
+            exec_string = ''
 
             lead = """
 def answer(df):
     return """
             
-            def cleanup(code):
-                """ patch: drop extra lines """
-                code = code.replace("<|EOT|>", "")
-                lines = code.split('\n')
-                extra_code = None
-                for i,line in enumerate(lines):
-                    if not line.startswith(' '):
-                        extra_code = i+1
-                        break
-                if extra_code:
-                    lines = lines[:extra_code]
-                # fix column names
-                columns = df.columns.to_list()
-                for i,line in enumerate(lines):
-                    for m in re.finditer(r"'(\w+)'", line):
-                        name = m.group(1)
-                        if name not in columns:
-                            for col in columns:
-                                if col.startswith(f"{name}<"):
-                                    lines[i] = lines[i].replace(f"'{name}'", f"'{col}'")
-                                    break
-                return '\n'.join(lines)
-
             if 'model_chat_template' in self.config and self.config['model_chat_template']:
-                instruction = response.strip()
-            elif 'batch_decode' in self.config and self.config['batch_decode']:
                 lead = """
-import pandas as pd
-import numpy as np
-
 def answer(df): """
-                instruction = cleanup(response)
+                instruction = response.strip()
+                if 'def answer' in instruction:
+                    lead = ''
+                if len(instruction.split('\n')) > 1:    
+                    instructions = [i.strip() for i in instruction.split('\n')]
+                    if 'return' not in instruction:
+                        instructions[-1] = f'return {instructions[-1]}'
+                    instructions = ['\t'+i if 'def answer' not in i else i for i in instructions]
+                    instruction = '\n'.join(instructions)
+                    lead += '\n'
+                else:
+                    if 'return' not in instruction:
+                        instruction = f'return {instruction}'
+            elif 'batch_decode' in self.config and self.config['batch_decode']:
+                exec_string = self.get_exec_string(df, response)
             else:
                 instruction = response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
 
-            exec_string = (
-                lead
-                + instruction
-                + "\nans = answer(df)"
-            )
-
-            if self.config.get('DUMP', False):
-                with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
-                    print(json.dumps({'prompt': prompt, 'exec_string': exec_string}), file=dump_file)
-                return
+            if not exec_string:
+                exec_string = (
+                    lead
+                    + instruction
+                    + "\nans = answer(df)"
+                )
 
             local_vars = {"df": df, "pd": pd, "np": np}
             exec(exec_string, local_vars)
@@ -155,6 +182,11 @@ def answer(df): """
                 ans = ans.iloc[:, 0].tolist()
 
             value = ans.split('\n')[0] if '\n' in str(ans) else ans 
+
+            if self.config.get('DUMP', False):
+                with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
+                    print(json.dumps({'prompt': prompt, 'exec_string': exec_string, 'response': response, 'answer': value, 'truth': row}, default=str), file=dump_file)
+                return
 
             if 'answer' in row:
                 truth = row['sample_answer'] if loader == utils.load_sample else row['answer']
@@ -176,9 +208,20 @@ def answer(df): """
         except Exception as e:
             print('*'*80)
             print(f'Error {e}')
+            print('|prompt')
+            print(prompt)
+            print('|dataset', dataset)
             print('|response')
             print(response)
+            print('|exec_string')
+            print(exec_string)
             print(traceback.format_exc())
+
+            if self.config.get('DUMP', False):
+                with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
+                    print(json.dumps({'prompt': prompt, 'exec_string': exec_string, 'response': response, 'answer': value, 'truth': row}, default=str), file=dump_file)
+                return
+
             return f"__CODE_ERROR__: {e}.".replace('\n', '\\n')
     
     @staticmethod
@@ -265,6 +308,29 @@ def answer(df): """
         print(f"Created Archive.zip containing {file_predictions} and {file_predictions_lite}")
 
 
+class ChatGPTDeepTabQA(DeepTabQA):
+    def __init__(self, config):
+        self.config = config
+        self.client = openai.OpenAI(api_key=self.config['OPENAI_API_KEY'])
+
+    def generate(self, prompt):
+        completion = self.client.chat.completions.create(
+            model=self.config['model_name'],
+            messages=[
+                {"role": "developer", "content": "You are a pandas code generator."},
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+        return completion.choices[0].message.content.replace('```python', '').replace('```', '').strip()
+    
+    @classmethod
+    def get_exec_string(cls, df, response):
+        return response + "\nans = answer(df)"
+
 from langchain_experimental.agents import create_pandas_dataframe_agent
 from langchain_huggingface import HuggingFacePipeline
 
@@ -321,6 +387,8 @@ def main():
     
     if 'class' in configuration and configuration['class'] == 'LangChainAgentDeepTabQA':
         deep_tab_qa = LangChainAgentDeepTabQA(config=configuration)
+    if configuration.get('openai', False):
+        deep_tab_qa = ChatGPTDeepTabQA(config=configuration)
     else:
         deep_tab_qa = DeepTabQA(config=configuration)
     
