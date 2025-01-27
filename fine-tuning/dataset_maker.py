@@ -9,6 +9,12 @@ from databench_eval import utils, Evaluator
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
+import os
+
+from transformers import set_seed
+
+set_seed(82)
+
 class DatasetMaker:
     def __init__(self, config: dict):
         self.config = config
@@ -25,15 +31,29 @@ class DatasetMaker:
 
 
     def invoke_llm(self, prompt: str):
-        inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
-        tokens = self.model.generate(
-            **inputs,
-            max_new_tokens=128,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=self.tokenizer.eos_token_id
-        )
-        return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
+        if 'model_chat_template' in self.config and self.config['model_chat_template']:
+            inputs = self.tokenizer.apply_chat_template([{'content': prompt, 'role': 'user'}], add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                inputs, 
+                max_new_tokens=128, 
+                do_sample=True, 
+                #top_k=50, 
+                #top_p=0.95,
+                #num_return_sequences=1, 
+                eos_token_id=self.tokenizer.eos_token_id)
+            
+            print(len(tokens))
+            return self.tokenizer.decode(tokens[0][len(inputs[0]):], skip_special_tokens=True)
+        else:
+            inputs = self.tokenizer(prompt, return_token_type_ids=False, return_tensors="pt").to(self.model.device)
+            tokens = self.model.generate(
+                **inputs,
+                max_new_tokens=128,
+                temperature=0.2,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            return self.tokenizer.decode(tokens[0], skip_special_tokens=True)
 
     def create_rejected(self, question: str, instruction: str):
 
@@ -41,7 +61,7 @@ class DatasetMaker:
 Modify the following Python instruction to return an incorrect value for the question: '{question}'.
 Create an alternative version with the main instruction altered, so that it returns an incorrect value.
 The error can be simple or non-trivial, but must remain in one line. Only use pandas and numpy.
-Do not include any additional text or explanations. Write just one.
+Do not include any additional text or explanations. Write minimun 5 samples.
 Respond with only the modified code in the following format:
 
 <code>{instruction}</code>
@@ -50,6 +70,7 @@ Respond with only the modified code in the following format:
         response = self.invoke_llm(prompt=prompt)
         answer = response.replace(prompt, '')
         
+        print('rejected')
         print(answer)
         
         pattern = r"<code>(.*?)</code>"
@@ -68,19 +89,32 @@ Respond with only the modified code in the following format:
             
             df = utils.load_table(dataset)
             df_lite = utils.load_sample(dataset)
-            environment = jinja2.Environment(loader=jinja2.FileSystemLoader('.'))
-            template = environment.get_template(self.config['prompt_template'])
+            environment = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.abspath(self.config['prompt_template']).replace(os.path.basename(self.config['prompt_template']), '')))
+            template = environment.get_template(os.path.basename(self.config['prompt_template']))
             prompt = template.render({'df': df, 'question': question})
 
             llm_response = self.invoke_llm(prompt)
-            # instruction contains something like df[df['selfMade'] == True]['personName'].iloc[0]
-            instruction = llm_response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
+
+
+            if 'model_chat_template' in self.config and self.config['model_chat_template']:
+                instruction = llm_response.strip()
+                if len(instruction.split('\n')) > 0:
+                    instruction = '; '.join(instruction.split('\n'))
+            else:
+                # instruction contains something like df[df['selfMade'] == True]['personName'].iloc[0]
+                instruction = llm_response.split("return")[1].split("\n")[0].strip().replace("[end of text]", "")
             
+            print(f'row\n{row}')
+            print(f'llm_response\n{llm_response}')
+            print(f'instruction\n{instruction}')
+
             global ans, ans_lite
             try:
                 lead = """
 def answer(df):
     return """
+                if 'return' in instruction:
+                    lead = lead.replace('return ', '')
                 exec_string = (
                     lead
                     + instruction
@@ -98,13 +132,13 @@ def answer(df):
                 # evaluate gold vs generated
                 if evaluator.compare(ans, truth, row['type']):
                     with open(self.config['fine_tuning_dataset'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': question, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                        for entry in set([json.dumps({'prompt': prompt, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
                             print(entry, file=fout)
                 # lite task
-                if evaluator.compare(ans_lite, truth_lite, row['type']):
-                    with open(self.config['fine_tuning_dataset_lite'], 'a+') as fout:
-                        for entry in set([json.dumps({'prompt': question, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
-                            print(entry, file=fout)
+                #if evaluator.compare(ans_lite, truth_lite, row['type']):
+                #    with open(self.config['fine_tuning_dataset_lite'], 'a+') as fout:
+                #        for entry in set([json.dumps({'prompt': prompt, 'chosen': instruction, 'rejected': rej}) for rej in self.create_rejected(question, instruction=instruction)]):
+                #           print(entry, file=fout)
                     
             except Exception as e:
                 import traceback
@@ -115,22 +149,35 @@ def answer(df):
 def main():
 
     parser = argparse.ArgumentParser(prog='')
-    parser.add_argument('action', choices=['dataset', 'fine-tuning'])
+    
+    parser.add_argument('name')
+    parser.add_argument('model')
+    parser.add_argument('prompt')
+    parser.add_argument('-model_chat_template', action='store_true')
 
     args = parser.parse_args()
-    if args.action == 'dataset':
-        config = {
-            'model_name': 'deepseek-ai/deepseek-coder-6.7b-instruct',
-            'prompt_template': 'prompts/prompt_improved_1.txt',
-            'fine_tuning_dataset': 'fine_tuning_dataset.json',
-            'fine_tuning_dataset_lite': 'fine_tuning_dataset_lite.json'
-        }
 
-        d = DatasetMaker(config=config)
-        d.generate()
-    elif args.action == 'fine-tuning':
-        dataset = load_dataset('json', data_files='fine_tuning_dataset.json')
-        dataset.save_to_disk('ft-dataset')
+    
+    dataset_name = 'fine_tuning_dataset.json' if not args.name else args.name
+    dataset_name_lite = f"{dataset_name.split('.json')[0]}_lite.json"
+
+    config = {
+        'model_name': args.model,
+        'prompt_template': args.prompt,
+        'fine_tuning_dataset': dataset_name,
+        'fine_tuning_dataset_lite': dataset_name_lite
+    }
+
+    if args.model_chat_template:
+        config['model_chat_template'] = True
+
+    print(config)
+
+    d = DatasetMaker(config=config)
+    d.generate()
+    
+    #dataset = load_dataset('json', data_files='fine_tuning_dataset.json')
+    #dataset.save_to_disk('ft-dataset')
 
 if __name__ == '__main__':
     main()
