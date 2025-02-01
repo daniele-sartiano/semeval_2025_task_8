@@ -1,19 +1,21 @@
 MODEL_NAME=deepseek-ai/deepseek-coder-6.7b-instruct
+#MODEL_NAME=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 PROMPT = ../prompts/prompt_improved_one_line.txt
 
-VERSION=14
+VERSION=15
 
 #DATASET=fine-tuning-dataset-chat-template-v7.json
 #DATASET=chatpgt_dataset/dataset_gpt4o_postproc.json
-DATASET=chatpgt_dataset/dataset_gpt4o_truths_postproc.json
+#DATASET=chatpgt_dataset/dataset_gpt4o_truths_postproc.json
+DATASET=chatpgt_dataset_dev/dataset_dev_train_gpt4o_truths_postproc.json
 
-DATASET_VERSION=dataset_gpt4o_truths_postproc
+DATASET_VERSION=dataset_dev_train_gpt4o_truths_postproc
 
 CHAT_TEMPLATE=-model_chat_template
 
 # default was 1000
-MAX_STEPS=10000
+MAX_STEPS=1000
 
 %.json:
 	python dataset_maker.py $@ "$(MODEL_NAME)" "$(PROMPT)" $(CHAT_TEMPLATE)
