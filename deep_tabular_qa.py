@@ -14,7 +14,7 @@ import json
 import openai
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, CodeAgent
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from databench_eval import Runner, Evaluator, utils
 from databench_eval.utils import load_sample
@@ -23,6 +23,17 @@ from databench_eval.utils import load_sample
 from transformers import set_seed
 
 set_seed(82)
+
+
+def test_load_table(name, base_path='/home/dsartiano/semeval_2025_task_8/competition'):
+    #f"hf://datasets/cardiffnlp/databench/data/{name}/all.parquet"
+    return pd.read_parquet(f'{base_path}/{name}/all.parquet')
+    #return pd.read_parquet()
+
+
+def test_load_sample(name, base_path='/home/dsartiano/semeval_2025_task_8/competition'):
+    #f"hf://datasets/cardiffnlp/databench/data/{name}/sample.parquet"
+    return pd.read_parquet(f'{base_path}/{name}/sample.parquet')
 
 class MyRunner(Runner):
     def process_prompt(self, prompts, datasets):
@@ -59,7 +70,7 @@ class DeepTabQA:
         
 
     @classmethod
-    def cleanup(cls, df, code):
+    def old_cleanup(cls, df, code):
         """ patch: drop extra lines """
         code = code.replace("<|EOT|>", "")
         lines = code.split('\n')
@@ -83,9 +94,50 @@ class DeepTabQA:
                             lines[i] = lines[i].replace(f"'{name}'", f"'{col}'")
                             break
         return '\n'.join(lines)
+    
 
     @classmethod
-    def get_exec_string(cls, df, response):
+    def cleanup(cls, df, code):
+        """Extract valid Python code, ensuring return statements are inside a function and removing extra non-code content."""
+        code = code.replace("<|EOT|>", "").strip()
+        lines = code.split("\n")
+
+        python_code = []
+        return_found = False  # Track if we have encountered a return statement
+
+        for line in lines:
+            stripped_line = line.strip()
+
+            # Detect return statement
+            if stripped_line.startswith("return "):
+                return_found = True
+
+            # Stop processing if we detect non-Python text after return
+            if return_found and not stripped_line.startswith(("def ", "return ", "    ", "\t")):
+                break  # Stop if we encounter metadata or unrelated text after return
+
+            python_code.append(line)
+
+        # If no function is found, wrap it inside `def answer(df):`
+        if not any(line.lstrip().startswith("def ") for line in python_code):
+            python_code.insert(0, "def answer(df):")
+            python_code = ["    " + line if i > 0 else line for i, line in enumerate(python_code)]  # Indent body
+
+        # Fix column names to match DataFrame
+        columns = df.columns.to_list()
+        for i, line in enumerate(python_code):
+            matches = re.findall(r"'(\w+)'", line)
+            for name in matches:
+                if name not in columns:
+                    for col in columns:
+                        if col.startswith(f"{name}<"):
+                            python_code[i] = python_code[i].replace(f"'{name}'", f"'{col}'")
+                            break
+
+        return '\n'.join(python_code)
+
+    @classmethod
+    def old_get_exec_string(cls, df, response):
         instruction = cls.cleanup(df, response)
 
         instructions = [el.strip() for el in instruction.split('\n')]
@@ -96,6 +148,33 @@ class DeepTabQA:
         exec_string += "\nans = answer(df)"
         return exec_string
     
+    @classmethod
+    def get_exec_string(cls, df, response):
+        """Prepare the cleaned function string for execution."""
+        instruction = cls.cleanup(df, response)
+
+        # Normalize indentation
+        instructions = [line.rstrip() for line in instruction.split("\n") if line.strip()]
+        min_indent = min((len(line) - len(line.lstrip())) for line in instructions if line.lstrip())
+
+        exec_string = '\n'.join([line[min_indent:] for line in instructions])
+        exec_string += "\nans = answer(df)"
+
+        return exec_string
+    
+    def execute(self, exec_string, df):
+        local_vars = {"df": df, "pd": pd, "np": np}
+        exec(exec_string, local_vars)
+        ans = local_vars['ans']
+        
+        if isinstance(ans, pd.Series):
+            ans = ans.tolist()
+        elif isinstance(ans, pd.DataFrame):
+            ans = ans.iloc[:, 0].tolist()
+
+        value = ans.split('\n')[0] if '\n' in str(ans) else ans
+        return value
+
     def prompt_generator(self, row: dict) -> str:
         """ IMPORTANT: 
         **Only the question and dataset keys will be available during the actual competition**.
@@ -104,7 +183,10 @@ class DeepTabQA:
         """
         dataset = row["dataset"]
         question = row["question"]
-        df = load_sample(dataset)
+        if self.config.get('test', None):
+            df = test_load_sample(dataset)
+        else:
+            df = load_sample(dataset)
 
         if 'prompt_template' in self.config:
             environment = jinja2.Environment(loader=jinja2.FileSystemLoader(self.config['experiment_dir']))
@@ -172,16 +254,7 @@ def answer(df): """
                     + "\nans = answer(df)"
                 )
 
-            local_vars = {"df": df, "pd": pd, "np": np}
-            exec(exec_string, local_vars)
-            ans = local_vars['ans']
-            
-            if isinstance(ans, pd.Series):
-                ans = ans.tolist()
-            elif isinstance(ans, pd.DataFrame):
-                ans = ans.iloc[:, 0].tolist()
-
-            value = ans.split('\n')[0] if '\n' in str(ans) else ans 
+            value = self.execute(exec_string, df)
 
             if self.config.get('DUMP', False):
                 with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
@@ -200,9 +273,22 @@ def answer(df): """
                     print('|response')
                     print(response)
                     print('|--> answer')
-                    print(ans)
+                    print(value)
                     print('|row')
                     print(row)
+            # else:
+            #     print('*'*80)
+            #     print('|prompt')
+            #     print(prompt)
+            #     print('|dataset', dataset)
+            #     print('|exec_string')
+            #     print(exec_string)
+            #     print('|response')
+            #     print(response)
+            #     print('|--> answer')
+            #     print(value)
+            #     print('|row')
+            #     print(row)
 
             return value
         except Exception as e:
@@ -215,12 +301,58 @@ def answer(df): """
             print(response)
             print('|exec_string')
             print(exec_string)
-            print(traceback.format_exc())
+            v_traceback = traceback.format_exc()
+            print(v_traceback)
 
             if self.config.get('DUMP', False):
                 with open(os.path.join(self.config['experiment_dir'], 'dump.json'), 'a') as dump_file:
                     print(json.dumps({'prompt': prompt, 'exec_string': exec_string, 'response': response, 'answer': value, 'truth': row}, default=str), file=dump_file)
                 return
+
+            if self.config.get('autofix', None):
+                prompt_description = self.config.get('autofix', 'Provide a revised version of the function.')
+                enriched_prompt = f'''
+{prompt.rsplit('Table columns:', 1)[0]}
+
+Given the following data:
+
+Table columns: {df.columns.to_list()}
+Dataframe: {df.head().to_json(orient='records')}
+Question: {row["question"]}
+
+The execution of this function:
+{exec_string}
+
+rises this Exception:
+
+{v_traceback}
+
+{prompt_description}
+
+Table columns: {df.columns.to_list()}
+Dataframe: {df.head().to_json(orient='records')}
+Question: {row["question"]}
+Function:
+def answer(df: pd.DataFrame):
+                '''
+                response = self.generate(enriched_prompt).strip()
+                exec_string = self.get_exec_string(df, response)
+                
+                print('|autofix prompt')
+                print(enriched_prompt)
+                print('|autofix response')
+                print(response)
+                print('|autofix exec_string')
+                print(exec_string)
+                try:
+                    value = self.execute(exec_string, df)
+                except Exception as e:
+                    print('|autofix error', e)
+                    print(traceback.format_exc())
+                    return f"__CODE_ERROR__: {e}.".replace('\n', '\\n')
+                
+                print('|autofix value', value)
+                return value
 
             return f"__CODE_ERROR__: {e}.".replace('\n', '\\n')
     
@@ -275,7 +407,10 @@ def answer(df): """
         return results
 
     def get_runner(self, lite: bool, qa: Dataset, batch_size: int=10) -> Runner:
-        load_data_fun = utils.load_table if not lite else utils.load_sample
+        if self.config.get('test', None):
+            load_data_fun = test_load_table if not lite else test_load_sample
+        else:
+            load_data_fun = utils.load_table if not lite else utils.load_sample
         self.runner = MyRunner(
             model_call=self.model_call,
             prompt_generator=self.prompt_generator,
@@ -400,10 +535,17 @@ def main():
 
     batch_size = configuration.get('batch_size', 20)
 
-    if limit is None:
+    test = configuration.get('test', None)
+
+    if test:
+        if limit is not None:
+            qa = load_dataset('/home/dsartiano/semeval_2025_task_8/competition')['test'].select(range(30))
+        else:
+            qa = load_dataset('/home/dsartiano/semeval_2025_task_8/competition')['test']
+    elif limit is None:
         qa = utils.load_qa(name="semeval", split=split, num_proc=32)
     else:
-        qa = utils.load_qa(name="semeval", split=split, num_proc=32).select(range(10))
+        qa = utils.load_qa(name="semeval", split=split, num_proc=32).select(range(30))
     
     print('dataset loaded')
     
@@ -419,9 +561,10 @@ def main():
         responses_lite = []
         file_predictions_lite = None
 
-    evaluator = Evaluator(qa=qa)
+    if not test:
+        evaluator = Evaluator(qa=qa)
+        deep_tab_qa.print_evaluation(evaluator=evaluator, responses=responses, responses_lite=responses_lite)
 
-    deep_tab_qa.print_evaluation(evaluator=evaluator, responses=responses, responses_lite=responses_lite)
     deep_tab_qa.create_zip(file_predictions, file_predictions_lite)
 
 if __name__ == '__main__':
